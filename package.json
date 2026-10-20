@@ -1,0 +1,23 @@
+{
+  "name": "online-go",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "在线围棋 - React + SQLite + WebSocket 本地对战系统",
+  "scripts": {
+    "build": "vite build --config client/vite.config.js",
+    "start": "node server/index.js",
+    "serve": "npm run build && node server/index.js",
+    "dev:client": "vite --config client/vite.config.js",
+    "test": "node tests/protocol.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
+  }
+}
