@@ -1,7 +1,35 @@
 import React, { useState } from 'react';
 import { useGameSocket } from './lib/useGameSocket.js';
+import { connHints } from './lib/config.js';
 import Lobby from './components/Lobby.jsx';
 import GameView from './components/GameView.jsx';
+
+function ConnBanner({ conn, status, onRetry }) {
+  // 首次连接中的正常状态不打扰用户
+  if (status === 'open') return null;
+  if (status === 'connecting' && conn.attempts === 0) return null;
+
+  return (
+    <div className="conn-banner" role="alert">
+      <div className="conn-banner-main">
+        <span className="conn-banner-title">
+          {status === 'connecting' ? '正在重连对战服务…' : '无法连接对战服务'}
+        </span>
+        <code className="conn-url">{conn.url}</code>
+        {conn.attempts > 0 && <span className="conn-meta">已尝试 {conn.attempts} 次</span>}
+        {conn.error && <span className="conn-meta conn-error">{conn.error}</span>}
+        <button className="btn btn-mini conn-retry" onClick={onRetry}>
+          立即重试
+        </button>
+      </div>
+      <ul className="conn-hints">
+        {connHints(conn.url).map((h, i) => (
+          <li key={i}>{h}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function Login({ onEnter, status }) {
   const [nick, setNick] = useState(localStorage.getItem('go.nick') || '');
@@ -29,7 +57,7 @@ function Login({ onEnter, status }) {
             onChange={(e) => setNick(e.target.value)}
           />
           <button className="btn btn-primary btn-lg btn-block" type="submit" disabled={status !== 'open'}>
-            {status === 'open' ? '进入棋室' : '连接中…'}
+            {status === 'open' ? '进入棋室' : status === 'connecting' ? '连接中…' : '对战服务未连接'}
           </button>
         </form>
         <div className="login-features">
@@ -43,7 +71,7 @@ function Login({ onEnter, status }) {
 }
 
 export default function App() {
-  const { status, me, lobby, game, you, queue, result, chat, toasts, actions } = useGameSocket();
+  const { status, conn, me, lobby, game, you, queue, result, chat, toasts, actions } = useGameSocket();
 
   return (
     <div className="app">
@@ -69,6 +97,8 @@ export default function App() {
           )}
         </div>
       </header>
+
+      <ConnBanner conn={conn} status={status} onRetry={actions.reconnect} />
 
       {!me ? (
         <Login onEnter={actions.login} status={status} />

@@ -26,6 +26,7 @@ import {
   finishGameRow,
   applyResult,
   totalUsers,
+  dbPing,
 } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -99,50 +100,79 @@ function serveStatic(pathname, res) {
 
 /* ------------------------------- HTTP 服务 ------------------------------- */
 
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
+function sendJson(res, code, data) {
+  res.writeHead(code, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store', ...CORS });
+  res.end(JSON.stringify(data));
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
-  if (url.pathname === '/api/health') {
-    res.writeHead(200, { 'Content-Type': MIME['.json'] });
-    res.end(JSON.stringify({ ok: true, online: onlineUsers.size, rooms: rooms.size, users: totalUsers() }));
-    return;
-  }
+  try {
+    if (url.pathname.startsWith('/api/')) {
+      if (req.method === 'OPTIONS') {
+        res.writeHead(204, CORS).end();
+        return;
+      }
 
-  if (url.pathname.startsWith('/api/game/')) {
-    const raw = url.pathname.slice('/api/game/'.length);
-    const isSgf = raw.endsWith('.sgf');
-    const id = isSgf ? raw.slice(0, -4) : raw;
-    const rec = getGameRecord(id);
-    if (!rec) {
-      res.writeHead(404, { 'Content-Type': MIME['.json'] }).end(JSON.stringify({ error: 'not found' }));
+      if (url.pathname === '/api/health') {
+        sendJson(res, 200, {
+          ok: true,
+          db: dbPing(),
+          online: onlineUsers.size,
+          rooms: rooms.size,
+          users: totalUsers(),
+          uptime: Math.round(process.uptime()),
+        });
+        return;
+      }
+
+      if (url.pathname.startsWith('/api/game/')) {
+        const raw = url.pathname.slice('/api/game/'.length);
+        const isSgf = raw.endsWith('.sgf');
+        const id = isSgf ? raw.slice(0, -4) : raw;
+        const rec = getGameRecord(id);
+        if (!rec) {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        if (isSgf) {
+          res.writeHead(200, {
+            'Content-Type': 'application/x-go-sgf; charset=utf-8',
+            'Content-Disposition': `attachment; filename="${id}.sgf"`,
+            ...CORS,
+          });
+          res.end(rec.sgf || '');
+          return;
+        }
+        sendJson(res, 200, rec);
+        return;
+      }
+
+      if (url.pathname === '/api/lobby') {
+        sendJson(res, 200, {
+          online: onlineUsers.size,
+          leaderboard: getLeaderboard(10),
+          recent: getRecentGames(12),
+        });
+        return;
+      }
+
+      sendJson(res, 404, { error: 'unknown endpoint' });
       return;
     }
-    if (isSgf) {
-      res.writeHead(200, {
-        'Content-Type': 'application/x-go-sgf; charset=utf-8',
-        'Content-Disposition': `attachment; filename="${id}.sgf"`,
-      });
-      res.end(rec.sgf || '');
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': MIME['.json'] });
-    res.end(JSON.stringify(rec));
-    return;
-  }
 
-  if (url.pathname === '/api/lobby') {
-    res.writeHead(200, { 'Content-Type': MIME['.json'] });
-    res.end(
-      JSON.stringify({
-        online: onlineUsers.size,
-        leaderboard: getLeaderboard(10),
-        recent: getRecentGames(12),
-      })
-    );
-    return;
+    serveStatic(url.pathname, res);
+  } catch (e) {
+    console.error('[http] 请求处理异常:', e);
+    if (!res.headersSent) sendJson(res, 500, { error: 'internal error' });
   }
-
-  serveStatic(url.pathname, res);
 });
 
 /* ------------------------------ WebSocket ------------------------------ */
@@ -476,31 +506,46 @@ wss.on('connection', (ws) => {
   ws.on('pong', () => {
     ws.isAlive = true;
   });
-  ws.on('message', (raw) => handleMessage(ws, raw.toString()));
-  ws.on('close', () => {
-    const userId = ws.userId;
-    if (!userId) return;
-    if (onlineUsers.get(userId)?.ws === ws) onlineUsers.delete(userId);
-    removeFromQueues(userId);
-    touchUser(userId);
-
-    const gameId = userRoom.get(userId);
-    const room = gameId ? rooms.get(gameId) : null;
-    if (room && room.phase !== 'finished') {
-      const color = room.colorOf(userId);
-      if (color) {
-        room.disconnected.add(color);
-        broadcastState(room);
-        const timer = setTimeout(() => {
-          graceTimers.delete(userId);
-          if (!onlineUsers.has(userId) && room.phase !== 'finished') {
-            room.forfeitByDisconnect(color);
-          }
-        }, DISCONNECT_GRACE_MS);
-        graceTimers.set(userId, timer);
-      }
+  // 单条消息异常不得影响其他连接与进程存活
+  ws.on('message', (raw) => {
+    try {
+      handleMessage(ws, raw.toString());
+    } catch (e) {
+      console.error('[ws] 消息处理异常:', e);
+      try {
+        send(ws, { type: 'error', message: '服务端处理异常，请重试' });
+      } catch {}
     }
-    broadcastLobby();
+  });
+  ws.on('error', (e) => console.error('[ws] 连接异常:', e.message));
+  ws.on('close', () => {
+    try {
+      const userId = ws.userId;
+      if (!userId) return;
+      if (onlineUsers.get(userId)?.ws === ws) onlineUsers.delete(userId);
+      removeFromQueues(userId);
+      touchUser(userId);
+
+      const gameId = userRoom.get(userId);
+      const room = gameId ? rooms.get(gameId) : null;
+      if (room && room.phase !== 'finished') {
+        const color = room.colorOf(userId);
+        if (color) {
+          room.disconnected.add(color);
+          broadcastState(room);
+          const timer = setTimeout(() => {
+            graceTimers.delete(userId);
+            if (!onlineUsers.has(userId) && room.phase !== 'finished') {
+              room.forfeitByDisconnect(color);
+            }
+          }, DISCONNECT_GRACE_MS);
+          graceTimers.set(userId, timer);
+        }
+      }
+      broadcastLobby();
+    } catch (e) {
+      console.error('[ws] 断开清理异常:', e);
+    }
   });
 });
 
@@ -520,9 +565,13 @@ const heartbeat = setInterval(() => {
 
 const ticker = setInterval(() => {
   for (const room of rooms.values()) {
-    if (room.phase === 'playing') {
-      room.tick(1);
-      broadcastState(room);
+    try {
+      if (room.phase === 'playing') {
+        room.tick(1);
+        broadcastState(room);
+      }
+    } catch (e) {
+      console.error('[tick] 对局推进异常:', room.id, e);
     }
   }
 }, 1000);
@@ -532,9 +581,14 @@ wss.on('close', () => {
   clearInterval(ticker);
 });
 
+// 兜底：任何漏网异常只记录，不让整局服务退出
+process.on('uncaughtException', (e) => console.error('[fatal] 未捕获异常:', e));
+process.on('unhandledRejection', (e) => console.error('[fatal] 未处理 Promise 拒绝:', e));
+
 server.listen(PORT, HOST, () => {
   console.log(`\n  在线围棋服务已启动`);
   console.log(`  → 本机访问: http://localhost:${PORT}`);
   console.log(`  → 局域网对战: http://<本机IP>:${PORT}`);
+  console.log(`  → WebSocket: ws://<本机IP>:${PORT}/ws`);
   console.log(`  → 数据库: data/go.db\n`);
 });

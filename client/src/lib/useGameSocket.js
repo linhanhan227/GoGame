@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { WS_URL } from './config.js';
 
 const UID_KEY = 'go.uid';
 const NICK_KEY = 'go.nick';
@@ -14,6 +15,7 @@ function getUid() {
 
 export function useGameSocket() {
   const [status, setStatus] = useState('connecting');
+  const [conn, setConn] = useState({ url: WS_URL, attempts: 0, error: '', since: Date.now() });
   const [me, setMe] = useState(null);
   const [lobby, setLobby] = useState({ online: 0, leaderboard: [], recent: [], queues: {}, players: [] });
   const [game, setGame] = useState(null);
@@ -26,7 +28,8 @@ export function useGameSocket() {
   const wsRef = useRef(null);
   const meRef = useRef(null);
   const retryRef = useRef(0);
-  const closedByUs = useRef(false);
+  const disposedRef = useRef(false);
+  const connectRef = useRef(null);
 
   const toast = useCallback((text, kind = 'info') => {
     const id = Math.random().toString(36).slice(2);
@@ -46,33 +49,37 @@ export function useGameSocket() {
   const login = useCallback((nickname) => {
     const nick = (nickname || '').trim().slice(0, 16) || '匿名棋士';
     localStorage.setItem(NICK_KEY, nick);
-    const payload = { type: 'login', userId: getUid(), nickname: nick };
     meRef.current = nick;
-    if (!rawSend(payload)) {
-      // 连接未就绪，等 onopen 后自动补发
-      return false;
-    }
-    return true;
+    // 连接未就绪时先记录昵称，onopen 后自动补发登录
+    return rawSend({ type: 'login', userId: getUid(), nickname: nick });
   }, []);
 
   useEffect(() => {
-    let disposed = false;
+    disposedRef.current = false;
 
     const connect = () => {
-      if (disposed) return;
+      if (disposedRef.current) return;
       setStatus('connecting');
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      setConn((c) => ({ ...c, url: WS_URL }));
+
+      let ws;
+      try {
+        ws = new WebSocket(WS_URL);
+      } catch (e) {
+        setStatus('closed');
+        setConn((c) => ({ ...c, error: e.message || '地址无效', attempts: c.attempts + 1 }));
+        setTimeout(connect, 2000);
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (disposed) return;
+        if (disposedRef.current) return;
         retryRef.current = 0;
         setStatus('open');
+        setConn({ url: WS_URL, attempts: 0, error: '', since: Date.now() });
         if (meRef.current) {
-          ws.send(
-            JSON.stringify({ type: 'login', userId: getUid(), nickname: meRef.current })
-          );
+          ws.send(JSON.stringify({ type: 'login', userId: getUid(), nickname: meRef.current }));
         }
       };
 
@@ -130,26 +137,34 @@ export function useGameSocket() {
         }
       };
 
-      ws.onclose = () => {
-        if (disposed) return;
+      ws.onclose = (ev) => {
+        if (disposedRef.current) return;
+        // 已被新连接替换，不再重复重连
+        if (wsRef.current !== ws) return;
         setStatus('closed');
-        if (closedByUs.current) return;
+        setConn((c) => ({
+          ...c,
+          attempts: c.attempts + 1,
+          error: ev.reason || (ev.code ? `连接被关闭（code ${ev.code}）` : '无法建立连接'),
+        }));
         const delay = Math.min(8000, 800 * 2 ** retryRef.current);
         retryRef.current += 1;
         setTimeout(connect, delay);
       };
 
       ws.onerror = () => {
-        try {
-          ws.close();
-        } catch {}
+        setConn((c) => ({
+          ...c,
+          error: c.error || '握手失败：目标地址不可达，或该端点不是 WebSocket 服务',
+        }));
       };
     };
 
+    connectRef.current = connect;
     connect();
+
     return () => {
-      disposed = true;
-      closedByUs.current = true;
+      disposedRef.current = true;
       try {
         wsRef.current?.close();
       } catch {}
@@ -158,6 +173,15 @@ export function useGameSocket() {
 
   const actions = {
     login,
+    reconnect: () => {
+      retryRef.current = 0;
+      const old = wsRef.current;
+      wsRef.current = null;
+      try {
+        old?.close();
+      } catch {}
+      connectRef.current?.();
+    },
     joinQueue: (size) => rawSend({ type: 'queue', size }),
     cancelQueue: () => rawSend({ type: 'cancel_queue' }),
     practice: (size) => rawSend({ type: 'practice', size }),
@@ -176,5 +200,5 @@ export function useGameSocket() {
     },
   };
 
-  return { status, me, lobby, game, you, queue, result, chat, toasts, actions, toast };
+  return { status, conn, me, lobby, game, you, queue, result, chat, toasts, actions, toast };
 }

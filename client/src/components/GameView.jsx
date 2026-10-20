@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Board from './Board.jsx';
+import { apiUrl } from '../lib/config.js';
 
 const fmt = (s) => {
   const v = Math.max(0, Math.round(s));
@@ -102,7 +103,7 @@ export default function GameView({ game, you, result, chat, actions, me }) {
                   <button className="btn btn-primary" onClick={actions.leaveTable}>
                     返回大厅
                   </button>
-                  <a className="btn btn-ghost" href={`/api/game/${game.id}.sgf`} download>
+                  <a className="btn btn-ghost" href={apiUrl(`/api/game/${game.id}.sgf`)} download>
                     下载棋谱
                   </a>
                 </div>

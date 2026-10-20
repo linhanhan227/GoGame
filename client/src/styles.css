@@ -136,6 +136,71 @@ button {
   border-left: 1px solid var(--line);
 }
 
+/* ---------------------------- 连接诊断横幅 ---------------------------- */
+
+.conn-banner {
+  border-bottom: 1px solid #efd9b8;
+  background: linear-gradient(180deg, #fdf6e8, #fbf1de);
+  padding: 12px 26px 14px;
+  color: #6b4a18;
+}
+
+.conn-banner-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.conn-banner-title {
+  font-weight: 700;
+}
+
+.conn-url {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: #fff8ea;
+  border: 1px solid #ecd9b7;
+  border-radius: 6px;
+  padding: 2px 8px;
+  color: #8a5a12;
+  word-break: break-all;
+}
+
+.conn-meta {
+  font-size: 12px;
+  color: #8a7440;
+}
+
+.conn-error {
+  color: #a8342a;
+}
+
+.conn-retry {
+  margin-left: auto;
+  background: #fff;
+  border-color: #e4cda4;
+  color: #7a5312;
+}
+
+.conn-hints {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.75;
+  color: #7d6539;
+}
+
+@media (max-width: 560px) {
+  .conn-banner {
+    padding: 10px 14px 12px;
+  }
+  .conn-retry {
+    margin-left: 0;
+  }
+}
+
 .user-chip {
   display: inline-flex;
   align-items: center;
