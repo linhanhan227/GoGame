@@ -1,13 +1,18 @@
 {
   "name": "online-go",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "在线围棋 - React + SQLite + WebSocket 本地对战系统",
+  "description": "在线围棋 - React + SQLite + WebSocket 在线对战系统（Bonto 托管适配）",
+  "engines": {
+    "node": "22"
+  },
   "scripts": {
     "build": "vite build --config client/vite.config.js",
-    "start": "node server/index.js",
-    "serve": "npm run build && node server/index.js",
+    "postbuild": "node scripts/build-info.js",
+    "start": "node scripts/boot.js",
+    "start:raw": "node server/index.js",
+    "serve": "npm run build && node scripts/boot.js",
     "dev:client": "vite --config client/vite.config.js",
     "test": "node --no-warnings tests/protocol.test.js && node --no-warnings tests/db.test.js"
   },

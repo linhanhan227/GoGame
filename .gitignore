@@ -1,8 +1,10 @@
 # dependencies
 node_modules/
 
-# build output
-dist/
+# 构建产物：Bonto 等平台只执行 npm start、没有独立构建步骤，
+# 因此 dist/ 需要进版本库。源码更新后 scripts/boot.js 会自动重建。
+# （本地纯前端开发不想提交时，可临时把下面这行放开）
+# dist/
 
 # runtime data (SQLite databases)
 data/
@@ -15,6 +17,8 @@ data/
 npm-debug.log*
 .DS_Store
 Thumbs.db
+# vite 构建时生成的临时配置文件
+*.timestamp-*.mjs
 
 # env
 .env

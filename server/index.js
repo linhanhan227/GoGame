@@ -27,6 +27,10 @@ import {
   applyResult,
   totalUsers,
   dbPing,
+  dbInfo,
+  sweepUnfinishedGames,
+  closeDb,
+  DB_FILE,
 } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -90,9 +94,11 @@ function serveStatic(pathname, res) {
       return;
     }
     const ext = path.extname(filePath).toLowerCase();
+    // config.js 是运行时配置，必须实时生效（否则平台改了 wsUrl 要等缓存过期）
+    const noCache = ext === '.html' || rel === '/config.js';
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600',
+      'Cache-Control': noCache ? 'no-cache' : 'public, max-age=3600',
     });
     res.end(data);
   });
@@ -111,10 +117,30 @@ function sendJson(res, code, data) {
   res.end(JSON.stringify(data));
 }
 
+function healthPayload() {
+  return {
+    ok: true,
+    db: dbPing(),
+    online: onlineUsers.size,
+    rooms: rooms.size,
+    users: totalUsers(),
+    uptime: Math.round(process.uptime()),
+    node: process.version,
+    dbFile: DB_FILE,
+    dbInfo: dbInfo(),
+  };
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
 
   try {
+    // 平台探活：Bonto 及常见外部监控会打 /healthz 或 /health
+    if (url.pathname === '/healthz' || url.pathname === '/health') {
+      sendJson(res, 200, healthPayload());
+      return;
+    }
+
     if (url.pathname.startsWith('/api/')) {
       if (req.method === 'OPTIONS') {
         res.writeHead(204, CORS).end();
@@ -122,14 +148,7 @@ const server = http.createServer((req, res) => {
       }
 
       if (url.pathname === '/api/health') {
-        sendJson(res, 200, {
-          ok: true,
-          db: dbPing(),
-          online: onlineUsers.size,
-          rooms: rooms.size,
-          users: totalUsers(),
-          uptime: Math.round(process.uptime()),
-        });
+        sendJson(res, 200, healthPayload());
         return;
       }
 
@@ -177,7 +196,13 @@ const server = http.createServer((req, res) => {
 
 /* ------------------------------ WebSocket ------------------------------ */
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  // 免费容器只有 0.5 CPU，压缩的 CPU 开销大于省下的带宽
+  perMessageDeflate: false,
+  maxPayload: 64 * 1024,
+});
 
 const send = (ws, payload) => {
   if (ws && ws.readyState === 1) ws.send(JSON.stringify(payload));
@@ -564,6 +589,8 @@ const heartbeat = setInterval(() => {
 }, 30_000);
 
 const ticker = setInterval(() => {
+  // 无对局时直接跳过，避免空转（休眠/低配环境下尤为重要）
+  if (rooms.size === 0) return;
   for (const room of rooms.values()) {
     try {
       if (room.phase === 'playing') {
@@ -585,10 +612,58 @@ wss.on('close', () => {
 process.on('uncaughtException', (e) => console.error('[fatal] 未捕获异常:', e));
 process.on('unhandledRejection', (e) => console.error('[fatal] 未处理 Promise 拒绝:', e));
 
+// 启动自检：对局状态只存在于内存，容器休眠/重启后必然丢失，
+// 数据库里遗留的 ended_at IS NULL 行需要统一标记为中断，否则大厅会显示打不完的对局。
+try {
+  const swept = sweepUnfinishedGames();
+  if (swept > 0) console.log(`[boot] 已清理 ${swept} 局上次进程遗留的未结束对局`);
+} catch (e) {
+  console.error('[boot] 僵尸对局清理失败:', e.message);
+}
+
 server.listen(PORT, HOST, () => {
+  const info = dbInfo();
   console.log(`\n  在线围棋服务已启动`);
   console.log(`  → 本机访问: http://localhost:${PORT}`);
   console.log(`  → 局域网对战: http://<本机IP>:${PORT}`);
   console.log(`  → WebSocket: ws://<本机IP>:${PORT}/ws`);
-  console.log(`  → 数据库: data/go.db\n`);
+  console.log(`  → 健康检查: /healthz`);
+  console.log(`  → 数据库: ${info.file}（${(info.sizeBytes / 1024).toFixed(1)} KB，${info.journalMode}）\n`);
 });
+
+/* ------------------------------ 优雅关闭 ------------------------------ */
+// 托管平台在休眠、重启、重新部署前会发 SIGTERM；必须先把 WAL 合并回主库再断开，
+// 否则容器被强杀时最近写入可能丢失。
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] 收到 ${signal}，开始关闭`);
+  clearInterval(heartbeat);
+  clearInterval(ticker);
+  for (const t of graceTimers.values()) clearTimeout(t);
+  graceTimers.clear();
+  for (const ws of wss.clients) {
+    try {
+      ws.close(1001, '服务重启中，请稍候重连');
+    } catch {}
+  }
+  try {
+    closeDb();
+  } catch (e) {
+    console.error('[shutdown] 关闭数据库异常:', e.message);
+  }
+  try {
+    wss.close();
+  } catch {}
+  server.close(() => {
+    console.log('[shutdown] 已安全退出');
+    process.exit(0);
+  });
+  // 兜底：长连接未及时释放也不阻塞平台重启
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

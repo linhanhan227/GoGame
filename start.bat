@@ -6,15 +6,12 @@ if not exist "node_modules" (
   echo [1/2] Installing dependencies...
   call npm install
 )
-if not exist "dist" (
-  echo [2/2] Building frontend...
-  call npm run build
-)
 
 echo.
 echo   Online Go starting at http://localhost:8080
 echo   Press Ctrl+C to stop.
 echo.
 start "" http://localhost:8080
-node --no-warnings server/index.js
+REM npm start 会走 scripts/boot.js：dist 缺失或源码更新时自动构建
+call npm start
 pause

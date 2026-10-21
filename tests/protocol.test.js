@@ -157,7 +157,15 @@ async function waitHealth() {
 }
 
 async function run() {
-  if (fs.existsSync(DB_FILE)) fs.rmSync(DB_FILE, { force: true });
+  // 清理上一次的库文件；WAL/SHM 必须一并删除，否则残留日志可能被回放，
+  // 让「干净库」假设失效（表现为排行榜/对局数不符合预期）。
+  for (const f of [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`]) {
+    try {
+      fs.unlinkSync(f);
+    } catch {
+      /* 文件不存在即视为已清理 */
+    }
+  }
 
   const server = spawn(process.execPath, ['server/index.js'], {
     cwd: ROOT,

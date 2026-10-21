@@ -8,13 +8,16 @@
 
 ```bash
 npm install
-npm run build
-npm start            # http://localhost:8080
+npm start            # http://localhost:8080（dist 缺失或源码更新时会自动构建）
 ```
 
-Windows 用户可直接双击 `start.bat`（自动装依赖、构建、开浏览器）。
+需要先产出构建产物时用 `npm run build`；`npm start` 内部走 `scripts/boot.js`，会做一次产物新鲜度检查，因此本地开发改完前端直接重启即可，不必手动 build。
+
+Windows 用户可直接双击 `start.bat`（自动装依赖、开浏览器、按需构建）。
 
 局域网对战：其他设备访问 `http://<本机IP>:8080` 即可进入同一棋室并自动匹配。
+
+公网发布：见 **§3 D. Bonto 托管**。
 
 开发模式：
 
@@ -23,7 +26,7 @@ node server/index.js      # 终端 1：后端（8080）
 npm run dev:client        # 终端 2：Vite（5173，/ws 与 /api 已代理）
 ```
 
-环境变量：`PORT`（默认 8080）、`HOST`（默认 0.0.0.0）、`GO_DB`（默认 `data/go.db`）。
+环境变量：`PORT`（默认 8080）、`HOST`（默认 0.0.0.0）、`GO_DB`（默认 `data/go.db`）、`SKIP_BUILD=1`（跳过启动时的产物新鲜度检查，冷启动最快）。
 
 ---
 
@@ -37,7 +40,7 @@ npm run dev:client        # 终端 2：Vite（5173，/ws 与 /api 已代理）
 | 服务 | 单 Node 进程：静态托管 + WebSocket 撮合 | 无外部依赖、无云服务 |
 | 数据 | SQLite 文件 `data/go.db` | 本地文件 |
 
-**结论：静态站点可以托管前端，但 WebSocket 必须另有一个 Node 进程。** 下面第 3 节给出三种部署组合。
+**结论：静态站点可以托管前端，但 WebSocket 必须另有一个 Node 进程。** 下面第 3 节给出四种部署组合。
 
 ---
 
@@ -101,6 +104,51 @@ server {
 
 此时 `config.js` 保持 `wsUrl: ''`（同源 `/ws`）即可。
 
+### D. Bonto 托管（公网发布，推荐在线对战）
+
+[Bonto](https://bonto.dev/) 是面向 Node.js 的托管平台（Glitch 的替代品），每个应用获得 `https://<子域名>.bonto.run`，自带 HTTPS 与 WebSocket 转发。本项目已针对其运行时约束做过适配，属于「一体化部署」——静态产物与 WS 同源，`config.js` 保持默认空值即可。
+
+**关键适配点（已内置，无需手动改）**
+
+| 平台约束 | 项目侧处理 |
+| --- | --- |
+| 默认 Node 20，而 `node:sqlite` 需要 22.5+ | `package.json` 声明 `engines.node: "22"`，平台据此选择运行时 |
+| 平台只执行 `npm start`，没有独立构建步骤 | `npm start` → `scripts/boot.js`，按**源码内容指纹**判断 `dist/` 是否过期并自动构建（不用时间戳，避免 git 检出后误触发） |
+| 端口由平台注入 | 读取 `process.env.PORT`，监听 `0.0.0.0` |
+| 容器休眠/重启会清空内存态 | 启动时把遗留的未结束对局标记为 `interrupted`，避免大厅出现打不完的局 |
+| 休眠/重部署前发 `SIGTERM` | 优雅关闭：合并 WAL → 关闭 WS → 退出，防丢最近写入 |
+| 文件系统可能不支持 WAL | `journal_mode=WAL` 失败时自动降级为 `DELETE` |
+| 免费档 0.5 CPU | 关闭 WS 压缩（`perMessageDeflate: false`）、无对局时跳过每秒 ticker |
+| 静态资源缓存 1 小时会挡住 `config.js` 变更 | `config.js` 与 `index.html` 均返回 `no-cache` |
+
+**部署步骤（CLI）**
+
+```bash
+npm i -g @sidequestvr/bonto
+bonto auth login                      # 终端给出的 6 位码在 https://bonto.dev/authorize 输入
+bonto apps create "在线围棋" online-go  # 子域名 → https://online-go.bonto.run
+bonto packages set-node-version online-go 22
+
+# 逐文件上传（node_modules / data 不要传，平台会自己装依赖）
+bonto files upload online-go package.json            package.json
+bonto files upload online-go server/index.js         server/index.js
+# …其余源码同理；dist/ 必须一并上传（见下方说明）
+
+bonto logs online-go --tail 50        # 看启动日志
+bonto status online-go                # 查看运行状态与访问地址
+```
+
+也可用 Git push-to-deploy：`bonto git info online-go` 拿到克隆地址，`git push` 即部署。
+
+**两个必须注意的点**
+
+1. **`dist/` 要进版本库**。平台不执行构建命令，`.gitignore` 已取消对 `dist/` 的忽略；若你仍选择不提交，`boot.js` 会在启动时现场构建（需要 devDependencies 已安装，冷启动多 3~10 秒）。
+2. **实时对战建议开 Always-On**。免费档 30 分钟无 HTTP 请求即休眠，休眠会掐断 WebSocket；前端有指数退避重连，但对局内存态会丢失。基础配置（0.5 CPU / 512M）下 Always-On 不额外消耗额度。
+
+**存储**：免费档 256MB，含源码与运行时文件（`node_modules` 不计）。SQLite 库文件极小（万手对局约数百 KB），足够使用；数据文件路径可用 `GO_DB` 覆盖。
+
+**自检**：部署后访问 `https://<子域名>.bonto.run/healthz`，应返回 `{ ok: true, db: true, node: "v22.x" }`；`db: false` 说明数据库不可写。
+
 ### 连接失败时的排查
 
 连接不上时页面顶部会出现**诊断横幅**，直接显示实际连接地址、重试次数与失败原因，无需翻控制台。对照下表：
@@ -153,6 +201,7 @@ server {
 │   ├── db.js                      SQLite 读写（node:sqlite，连接失效自愈）
 │   └── ai.js                      陪练 AI
 ├── shared/go-engine.js            规则引擎（前后端共用，纯函数）
+├── scripts/boot.js                启动引导：产物新鲜度检查 + 自动构建（Bonto 等平台用）
 ├── tests/
 │   ├── protocol.test.js           规则单测 + 端到端协议测试（28 项）
 │   └── db.test.js                 持久层容错测试（4 项）
@@ -205,9 +254,11 @@ server {
 node -e "const {DatabaseSync}=require('node:sqlite');const db=new DatabaseSync('data/go.db');console.table(db.prepare('select id,nickname,wins,losses,rating from users order by rating desc limit 10').all())"
 ```
 
-HTTP 接口：`/api/health`、`/api/lobby`、`/api/game/:id`、`/api/game/:id.sgf`（均带 CORS 头，可跨域调用）。
+HTTP 接口：`/healthz`（平台探活，同 `/health`）、`/api/health`、`/api/lobby`、`/api/game/:id`、`/api/game/:id.sgf`（均带 CORS 头，可跨域调用）。
 
-**容错**：数据库文件在运行期被删除或替换时，连接会失效（`SQLITE_ERROR: locking protocol`）。持久层对此做了一次「失败即重建连接并重试」的兜底；WebSocket 消息处理、计时循环、断开清理均有异常隔离，单个请求出错不会导致服务退出。
+`/api/health` 返回 `{ ok, db, online, rooms, users, uptime, node, dbFile, dbInfo }`，其中 `dbInfo` 含库文件大小、WAL 大小与实际日志模式——部署到托管平台时用它确认数据盘可写。
+
+**容错**：数据库文件在运行期被删除或替换时，连接会失效（`SQLITE_ERROR: locking protocol`）。持久层对此做了一次「失败即重建连接并重试」的兜底；`journal_mode=WAL` 在受限文件系统上不可用时会降级为 `DELETE`；`SIGTERM` 关闭前执行 `wal_checkpoint(TRUNCATE)` 再断开。WebSocket 消息处理、计时循环、断开清理均有异常隔离，单个请求出错不会导致服务退出。
 
 ---
 
@@ -229,4 +280,6 @@ npm test
 - 匹配按棋盘规格排队，时限固定随规格（不支持自选时限）
 - 无账号密码体系，身份为浏览器会话级 ID（同浏览器新标签页即新身份，便于本地多人测试）
 - 计时为包干制，未实现读秒
-- 进程内状态（对局、队列）不持久化：服务重启后进行中的对局丢失，已完成对局与棋谱仍在库中
+- 进程内状态（对局、队列）不持久化：服务重启后进行中的对局丢失，已完成对局与棋谱仍在库中。启动时会把库里遗留的未结束对局标记为 `interrupted`，不会出现「永远打不完」的僵尸对局
+- 托管平台（如 Bonto）自动休眠会中断 WebSocket；前端按指数退避重连，但对局内存态无法跨休眠保留，实时对战建议开 Always-On
+- 单进程单实例：`rooms` / `queues` / `onlineUsers` 都在内存，水平扩容多副本会导致用户分布在不同实例、无法互相匹配

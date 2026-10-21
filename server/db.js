@@ -108,14 +108,45 @@ function prepareStatements() {
        ORDER BY ended_at DESC LIMIT ?`
     ),
     countUsers: db.prepare('SELECT COUNT(*) AS n FROM users'),
+    sweepUnfinished: db.prepare(
+      `UPDATE games SET ended_at = ?, end_reason = 'interrupted',
+         result = COALESCE(result, '服务重启，对局中断')
+       WHERE ended_at IS NULL`
+    ),
   });
 }
+
+/**
+ * 容器/托管平台（如 Bonto）的文件系统可能不支持 WAL 或为网络盘，
+ * 因此 WAL 失败时降级为 DELETE 日志模式，而不是让整个服务起不来。
+ */
+function applyPragmas() {
+  try {
+    db.exec('PRAGMA busy_timeout = 5000');
+  } catch {}
+  let mode = 'unknown';
+  try {
+    const row = db.prepare('PRAGMA journal_mode = WAL').get();
+    mode = row?.journal_mode || 'wal';
+  } catch (e) {
+    console.warn('[db] WAL 不可用，降级为 DELETE 模式：', e.message);
+    try {
+      db.exec('PRAGMA journal_mode = DELETE');
+      mode = 'delete';
+    } catch {}
+  }
+  try {
+    db.exec('PRAGMA synchronous = NORMAL');
+  } catch {}
+  return mode;
+}
+
+let journalMode = 'unknown';
 
 function open() {
   fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
   db = new DatabaseSync(DB_FILE);
-  db.exec('PRAGMA journal_mode = WAL');
-  db.exec('PRAGMA synchronous = NORMAL');
+  journalMode = applyPragmas();
   db.exec(SCHEMA);
   prepareStatements();
 }
@@ -242,6 +273,62 @@ export function getUserGames(userId, limit = 10) {
 
 export function totalUsers() {
   return withDb(() => stmt.countUsers.get().n);
+}
+
+/**
+ * 进程启动时清理「僵尸对局」。
+ * 对局状态（rooms / userRoom）只存在于内存，容器休眠、重启或崩溃后必然丢失，
+ * 但数据库里的 games 行仍会是 ended_at IS NULL。这里统一标记为中断，
+ * 避免大厅/战绩里出现永远打不完的对局。
+ * @returns {number} 被清理的行数
+ */
+export function sweepUnfinishedGames() {
+  return withDb(() => {
+    const r = stmt.sweepUnfinished.run(now());
+    return Number(r.changes || 0);
+  });
+}
+
+/** 健康检查与运维诊断用的数据库信息 */
+export function dbInfo() {
+  let size = 0;
+  let walSize = 0;
+  try {
+    size = fs.statSync(DB_FILE).size;
+  } catch {}
+  try {
+    walSize = fs.statSync(`${DB_FILE}-wal`).size;
+  } catch {}
+  return {
+    file: DB_FILE,
+    sizeBytes: size,
+    walBytes: walSize,
+    journalMode,
+    users: safeCount(),
+  };
+}
+
+function safeCount() {
+  try {
+    return withDb(() => stmt.countUsers.get().n);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 优雅关闭：托管平台在休眠/重启前会发 SIGTERM，
+ * 必须先把 WAL 合并回主库再断开，否则容器被强杀可能丢失最近写入。
+ */
+export function closeDb() {
+  if (!db) return;
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch {}
+  try {
+    db.close();
+  } catch {}
+  db = null;
 }
 
 /** 健康检查：能读即视为正常 */
